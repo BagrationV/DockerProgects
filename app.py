@@ -9,6 +9,8 @@ from psycopg2.extras import RealDictCursor
 import logging
 import time
 import json
+import uuid
+from typing import Optional
 
 # Configure logging
 logging.basicConfig(
@@ -27,10 +29,56 @@ async def read_root():
 
 class Conversation(BaseModel):
     user_input: str
+    session_id: Optional[str] = None
+
+# Function to get conversation history from database
+def get_conversation_history(session_id: str):
+    try:
+        conn = psycopg2.connect(
+            host="postgres",
+            database="vit",
+            user="vit",
+            password="vit"
+        )
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            "SELECT user_input, model_response FROM conversation_history WHERE session_id = %s ORDER BY timestamp ASC",
+            (session_id,)
+        )
+        history = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        # Log the raw history data
+        logging.info(f"Raw history data for session {session_id}: {json.dumps([dict(h) for h in history])}")
+        
+        # Format history as a conversation string with clear context markers
+        conversation_history = ""
+        for entry in history:
+            conversation_history += f"User: {entry['user_input']}\nAssistant: {entry['model_response']}\n\n"
+        
+        # Log the formatted conversation history
+        logging.info(f"Formatted conversation history: {conversation_history}")
+        
+        return conversation_history
+    except Exception as e:
+        logging.error(f"Error retrieving conversation history: {e}")
+        return ""
 
 @app.post("/chat")
 async def chat(conversation: Conversation):
     try:
+        # Generate session ID if not provided
+        if not conversation.session_id:
+            conversation.session_id = str(uuid.uuid4())
+            logging.info(f"Created new session ID: {conversation.session_id}")
+        else:
+            logging.info(f"Using existing session ID: {conversation.session_id}")
+        
+        # Get conversation history
+        conversation_history = get_conversation_history(conversation.session_id)
+        logging.info(f"Retrieved conversation history for session {conversation.session_id}, length: {len(conversation_history)}")
+        
         # Log the incoming request
         logging.info(f"Received chat request with input: {conversation.user_input[:50]}...")
         
@@ -114,6 +162,33 @@ async def chat(conversation: Conversation):
             logging.error(f"Error checking/pulling model: {model_error}")
             # Continue anyway, maybe the model exists but we couldn't check
         
+        # Prepare the full prompt with conversation history
+        system_instruction = """You are an AI assistant having a conversation with a user. 
+        You MUST remember all information shared in this conversation, especially names, preferences, and personal details.
+        When asked about information previously shared, you MUST recall it accurately.
+        Pay special attention to the user's name if they mention it and ALWAYS remember it for future reference.
+        If the user says their name is X, you MUST remember that their name is X and use it when appropriate.
+        Always maintain context throughout the entire conversation.
+        The following is the conversation history:
+        """
+        
+        full_prompt = system_instruction + "\n\n"
+        
+        if conversation_history:
+            full_prompt += conversation_history
+            # Make sure there's a newline at the end of the history
+            if not full_prompt.endswith("\n\n"):
+                full_prompt += "\n\n"
+            full_prompt += f"User: {conversation.user_input}\nAssistant:"
+        else:
+            full_prompt += f"User: {conversation.user_input}\nAssistant:"
+        
+        logging.info(f"Prepared full prompt with history, total length: {len(full_prompt)}")
+        # Log a preview of the prompt to avoid excessive logging
+        prompt_preview = full_prompt[:500] + "..." if len(full_prompt) > 500 else full_prompt
+        logging.info(f"Full prompt preview: {prompt_preview}")
+        logging.info(f"Full prompt: {full_prompt}")
+        
         # Try with primary model first, then fallback if needed
         response = None
         try:
@@ -125,8 +200,13 @@ async def chat(conversation: Conversation):
                 f"{ollama_host}/api/generate",
                 json={
                     "model": model_name,
-                    "prompt": conversation.user_input,
-                    "stream": False
+                    "prompt": full_prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.7,
+                        "num_ctx": 4096,  # Increase context window
+                        "top_p": 0.9
+                    }
                 },
                 timeout=120  # Increased timeout for model generation
             )
@@ -157,7 +237,7 @@ async def chat(conversation: Conversation):
                     f"{ollama_host}/api/generate",
                     json={
                         "model": fallback_model,
-                        "prompt": conversation.user_input,
+                        "prompt": full_prompt,
                         "stream": False
                     },
                     timeout=60
@@ -200,9 +280,9 @@ async def chat(conversation: Conversation):
                 detail=f"Failed to parse model response: {str(json_error)}"
             )
         
-        # Store conversation in database
+        # Store conversation in database with session_id
         try:
-            logging.info("Storing conversation in database")
+            logging.info(f"Storing conversation in database for session {conversation.session_id}")
             conn = psycopg2.connect(
                 host="postgres",
                 database="vit",
@@ -211,8 +291,8 @@ async def chat(conversation: Conversation):
             )
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO conversation_history (user_input, model_response) VALUES (%s, %s)",
-                (conversation.user_input, model_response)
+                "INSERT INTO conversation_history (session_id, user_input, model_response) VALUES (%s, %s, %s)",
+                (conversation.session_id, conversation.user_input, model_response)
             )
             conn.commit()
             cursor.close()
@@ -223,7 +303,7 @@ async def chat(conversation: Conversation):
             # Continue even if database operation fails
         
         logging.info(f"Returning successful response with length {len(model_response)}")
-        return {"response": model_response}
+        return {"response": model_response, "session_id": conversation.session_id}
     
     except HTTPException:
         # Re-raise HTTP exceptions without modification
