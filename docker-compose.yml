@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    depends_on:
+      - ollama
+      - postgres
+    networks:
+      - mynetwork
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    runtime: nvidia  # Use NVIDIA runtime for GPU access
+    networks:
+      - mynetwork
+      
+  postgres:
+    image: postgres:17
+    environment:
+      - POSTGRES_USER=vit
+      - POSTGRES_PASSWORD=vit
+      - POSTGRES_DB=vit
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    networks:
+      - mynetwork
+
+networks:
+  mynetwork:
+    driver: bridge
+
+volumes:
+  ollama_data:
+  postgres_data:

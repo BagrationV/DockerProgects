@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+requests
+aiofiles
+python-multipart
+psycopg2-binary
