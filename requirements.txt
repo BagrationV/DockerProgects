@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 requests
-aiofiles
-python-multipart
+sqlalchemy
 psycopg2-binary
+transformers
+ollama
